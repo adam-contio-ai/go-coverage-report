@@ -89,13 +89,13 @@ start_group "Downloading tar archive from GitHub"
 mkdir -p .github/outputs
 OS=$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
 FILENAME="go-coverage-report-${VERSION}-${OS}-${ARCH}.tar.gz"
-URL="https://github.com/fgrosse/go-coverage-report/releases/download/${VERSION}/${FILENAME}"
+URL="https://github.com/adam-contio-ai/go-coverage-report/releases/download/${VERSION}/${FILENAME}"
 curl --fail --location "$URL" --output ".github/outputs/$FILENAME"
 end_group
 
 if ! [[ "$SHA256SUM" ]] ; then
   start_group "Checking checksum using checksums.txt file from GitHub release"
-  URL="https://github.com/fgrosse/go-coverage-report/releases/download/${VERSION}/checksums.txt"
+  URL="https://github.com/adam-contio-ai/go-coverage-report/releases/download/${VERSION}/checksums.txt"
   cd .github/outputs
   curl -fsSL "$URL" | sha256sum --check --ignore-missing
   cd -
