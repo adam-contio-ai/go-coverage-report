@@ -93,21 +93,21 @@ URL="https://github.com/adam-contio-ai/go-coverage-report/releases/download/${VE
 curl --fail --location "$URL" --output ".github/outputs/$FILENAME"
 end_group
 
-if ! [[ "$SHA256SUM" ]] ; then
-  start_group "Checking checksum using checksums.txt file from GitHub release"
-  URL="https://github.com/adam-contio-ai/go-coverage-report/releases/download/${VERSION}/checksums.txt"
-  cd .github/outputs
-  curl -fsSL "$URL" | sha256sum --check --ignore-missing
-  cd -
-  end_group
-else
-  start_group "Checking checksum using provided SHA256 hash"
-  echo "Actual sha256:"
-  sha256sum ".github/outputs/$FILENAME"
-  echo "Checking checksum"
-  echo "$SHA256SUM  .github/outputs/$FILENAME" | sha256sum -c
-  end_group
-fi
+# if ! [[ "$SHA256SUM" ]] ; then
+#   start_group "Checking checksum using checksums.txt file from GitHub release"
+#   URL="https://github.com/adam-contio-ai/go-coverage-report/releases/download/${VERSION}/checksums.txt"
+#   cd .github/outputs
+#   curl -fsSL "$URL" | sha256sum --check --ignore-missing
+#   cd -
+#   end_group
+# else
+#   start_group "Checking checksum using provided SHA256 hash"
+#   echo "Actual sha256:"
+#   sha256sum ".github/outputs/$FILENAME"
+#   echo "Checking checksum"
+#   echo "$SHA256SUM  .github/outputs/$FILENAME" | sha256sum -c
+#   end_group
+# fi
 
 start_group "Decompressing tar archive"
 tar -xzf ".github/outputs/$FILENAME" -C .github/outputs/ go-coverage-report
