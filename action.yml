@@ -99,6 +99,7 @@ runs:
         GH_TOKEN: ${{ github.token }}
         GITHUB_BASELINE_WORKFLOW_REF: ${{ inputs.github-baseline-workflow-ref }}
         TARGET_BRANCH: ${{ github.base_ref }}
+        BASELINE_SHA: ${{ github.event.pull_request.base.sha }}
         CHANGED_FILES_PATH: .github/outputs/all_modified_files.json
         COVERAGE_ARTIFACT_NAME: ${{ inputs.coverage-artifact-name }}
         COVERAGE_FILE_NAME: ${{ inputs.coverage-file-name }}

@@ -29,7 +29,9 @@ You can use the following environment variables to configure the script:
 - TARGET_BRANCH: The base branch to compare the coverage results against (default: main)
 - COVERAGE_ARTIFACT_NAME: The name of the artifact containing the code coverage results (default: code-coverage)
 - COVERAGE_FILE_NAME: The name of the file containing the code coverage results (default: coverage.txt)
-- BASELINE_SEARCH_LIMIT: The number of most recent runs on the target branch to search for a baseline (default: 50)
+- BASELINE_SHA: The commit to compare the coverage results against, e.g. the base commit of the pull request (optional)
+- BASELINE_SEARCH_LIMIT: The maximum number of runs to search for a baseline per query (default: 50)
+- BASELINE_MAX_AGE_DAYS: The maximum age in days of a baseline run found on the target branch (default: 90)
 - CHANGED_FILES_PATH: The path to the file containing the list of changed files (default: .github/outputs/all_modified_files.json)
 - ROOT_PACKAGE: The import path of the tested repository to add as a prefix to all paths of the changed files (optional)
 - PROJECT_PATH: The path to the root package of the tested repository (optional)
@@ -50,7 +52,9 @@ GITHUB_BASELINE_WORKFLOW=${GITHUB_BASELINE_WORKFLOW:-CI}
 TARGET_BRANCH=${TARGET_BRANCH:-main}
 COVERAGE_ARTIFACT_NAME=${COVERAGE_ARTIFACT_NAME:-code-coverage}
 COVERAGE_FILE_NAME=${COVERAGE_FILE_NAME:-coverage.txt}
+BASELINE_SHA=${BASELINE_SHA:-}
 BASELINE_SEARCH_LIMIT=${BASELINE_SEARCH_LIMIT:-50}
+BASELINE_MAX_AGE_DAYS=${BASELINE_MAX_AGE_DAYS:-90}
 
 OLD_COVERAGE_PATH=.github/outputs/old-coverage.txt
 NEW_COVERAGE_PATH=.github/outputs/new-coverage.txt
@@ -117,15 +121,31 @@ find_baseline_run_id(){
 }
 
 start_group "Download code coverage results from target branch"
-# The runs are filtered client-side because the server-side --status=success filter of "gh run list" returns stale
-# results, i.e. old runs whose coverage artifact may already have expired.
-SUCCESSFUL_RUN_IDS=$(gh run list --branch="$TARGET_BRANCH" --workflow="$GITHUB_BASELINE_WORKFLOW" --event=push --limit="$BASELINE_SEARCH_LIMIT" --json=databaseId,status,conclusion -q '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId')
+# GitHub returns stale results for run lists that are only filtered by branch, event or status, i.e. old runs whose
+# coverage artifact may already have expired. Therefore, every query is bounded by a commit or a creation date and the
+# runs are filtered client-side.
+SUCCESSFUL_PUSH_RUNS_JQ=".[] | select(.status == \"completed\" and .conclusion == \"success\" and .event == \"push\" and .headBranch == \"$TARGET_BRANCH\") | .databaseId"
+RUN_FIELDS=databaseId,status,conclusion,event,headBranch
 
-# shellcheck disable=SC2086 # Word splitting of the run IDs is intended.
-if ! BASELINE_RUN_ID=$(find_baseline_run_id $SUCCESSFUL_RUN_IDS); then
-  echo "::warning::No successful run of workflow \"$GITHUB_BASELINE_WORKFLOW\" on branch \"$TARGET_BRANCH\" has an unexpired \"$COVERAGE_ARTIFACT_NAME\" artifact. Skipping the coverage report."
-  end_group
-  exit 0
+BASELINE_RUN_ID=""
+if [ -n "$BASELINE_SHA" ]; then
+  BASE_COMMIT_RUN_IDS=$(gh run list --workflow="$GITHUB_BASELINE_WORKFLOW" --commit="$BASELINE_SHA" --limit="$BASELINE_SEARCH_LIMIT" --json="$RUN_FIELDS" -q "$SUCCESSFUL_PUSH_RUNS_JQ")
+  # shellcheck disable=SC2086 # Word splitting of the run IDs is intended.
+  if ! BASELINE_RUN_ID=$(find_baseline_run_id $BASE_COMMIT_RUN_IDS); then
+    echo "No successful run of base commit $BASELINE_SHA has an unexpired \"$COVERAGE_ARTIFACT_NAME\" artifact, searching recent runs on branch \"$TARGET_BRANCH\" instead"
+  fi
+fi
+
+if [ -z "$BASELINE_RUN_ID" ]; then
+  # GNU date (GitHub runners) or BSD date (macOS).
+  MIN_CREATED_DATE=$(date -u -d "-$BASELINE_MAX_AGE_DAYS days" +%Y-%m-%d 2>/dev/null || date -u -v-"$BASELINE_MAX_AGE_DAYS"d +%Y-%m-%d)
+  RECENT_RUN_IDS=$(gh run list --workflow="$GITHUB_BASELINE_WORKFLOW" --branch="$TARGET_BRANCH" --event=push --created=">=$MIN_CREATED_DATE" --limit="$BASELINE_SEARCH_LIMIT" --json="$RUN_FIELDS" -q "$SUCCESSFUL_PUSH_RUNS_JQ")
+  # shellcheck disable=SC2086 # Word splitting of the run IDs is intended.
+  if ! BASELINE_RUN_ID=$(find_baseline_run_id $RECENT_RUN_IDS); then
+    echo "::warning::No successful run of workflow \"$GITHUB_BASELINE_WORKFLOW\" on branch \"$TARGET_BRANCH\" created since $MIN_CREATED_DATE has an unexpired \"$COVERAGE_ARTIFACT_NAME\" artifact. Skipping the coverage report."
+    end_group
+    exit 0
+  fi
 fi
 
 if ! gh run download "$BASELINE_RUN_ID" --name="$COVERAGE_ARTIFACT_NAME" --dir="/tmp/gh-run-download-$BASELINE_RUN_ID"; then
