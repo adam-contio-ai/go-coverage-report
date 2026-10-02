@@ -273,7 +273,7 @@ for test_name in "${TESTS[@]}"; do
     echo "    --- calls ---"
     sed 's/^/    /' "$FAKE_DIR/calls.log"
     echo "    --- output ---"
-    sed 's/^/    /' <<< "$ACTION_OUTPUT"
+    echo "    ${ACTION_OUTPUT//$'\n'/$'\n'    }"
   fi
   rm -rf "$TEST_DIR"
 done
