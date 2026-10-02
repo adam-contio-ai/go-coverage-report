@@ -24,8 +24,10 @@ write_stubs(){
   cat > "$bin_dir/gh" <<'EOF'
 #!/usr/bin/env bash
 # Stub of the GitHub CLI. Fixtures are read from $FAKE_DIR:
-# - runs.json:          the run list returned by "gh run list" without the --status=success filter
-# - stale_runs.json:    the run list returned by "gh run list --status=success" (emulates GitHub's stale results)
+# - commit_runs/<sha>.json the run list returned by "gh run list --commit=<sha>" (default: no runs)
+# - runs.json:          the run list returned by "gh run list --created=..."
+# - stale_runs.json:    the run list returned by "gh run list" filtered only by branch/event/status, which emulates the
+#                       stale results GitHub returns for such queries
 # - artifacts/<id>.json the response of "gh api repos/<repo>/actions/runs/<id>/artifacts"
 # - downloadable:       IDs of runs whose coverage artifact "gh run download" can download, one per line
 set -u
@@ -49,10 +51,23 @@ output_json(){
 
 case "$1 $2" in
   "run list")
-    if [[ " $* " == *" --status=success "* ]]; then
-      output_json "$FAKE_DIR/stale_runs.json"
-    else
+    commit=""
+    created=false
+    for arg in "$@"; do
+      case "$arg" in
+        --commit=*) commit=${arg#--commit=} ;;
+        --created=*) created=true ;;
+      esac
+    done
+    if [ -n "$commit" ]; then
+      if [ ! -f "$FAKE_DIR/commit_runs/$commit.json" ]; then
+        echo '[]' > "$FAKE_DIR/commit_runs/$commit.json"
+      fi
+      output_json "$FAKE_DIR/commit_runs/$commit.json"
+    elif [ "$created" = true ]; then
       output_json "$FAKE_DIR/runs.json"
+    else
+      output_json "$FAKE_DIR/stale_runs.json"
     fi
     ;;
   "run download")
@@ -134,21 +149,22 @@ run_action(){
       PROJECT_PATH="app" \
       TRIM_PACKAGE="" \
       SKIP_COMMENT="${SKIP_COMMENT:-false}" \
+      BASELINE_SHA="${BASELINE_SHA:-}" \
       bash "$ACTION_SCRIPT" "example/repo" "$PULL_REQUEST_NUMBER" "$CURRENT_RUN_ID" 2>&1
   )
   ACTION_EXIT_CODE=$?
 }
 
-# Default fixtures: the server-side --status=success filter returns stale run 100, whose artifact was deleted, while
-# the actual run list contains newer runs in various states with run 200 being the newest successful one.
-setup_stale_status_success_filter(){
-  echo '[{"databaseId":100,"status":"completed","conclusion":"success"}]' > "$FAKE_DIR/stale_runs.json"
+# Default fixtures: the run list filtered only by branch/event/status returns stale run 100, whose artifact was deleted,
+# while the actual run list contains newer runs in various states with run 200 being the newest successful one.
+setup_stale_run_list(){
+  echo '[{"databaseId":100,"status":"completed","conclusion":"success","event":"push","headBranch":"main"}]' > "$FAKE_DIR/stale_runs.json"
   cat > "$FAKE_DIR/runs.json" <<'EOF'
 [
-  {"databaseId":300,"status":"in_progress","conclusion":""},
-  {"databaseId":250,"status":"completed","conclusion":"cancelled"},
-  {"databaseId":200,"status":"completed","conclusion":"success"},
-  {"databaseId":100,"status":"completed","conclusion":"success"}
+  {"databaseId":300,"status":"in_progress","conclusion":"","event":"push","headBranch":"main"},
+  {"databaseId":250,"status":"completed","conclusion":"cancelled","event":"push","headBranch":"main"},
+  {"databaseId":200,"status":"completed","conclusion":"success","event":"push","headBranch":"main"},
+  {"databaseId":100,"status":"completed","conclusion":"success","event":"push","headBranch":"main"}
 ]
 EOF
   write_no_artifacts 100
@@ -156,8 +172,8 @@ EOF
   printf '%s\n' "$CURRENT_RUN_ID" 200 > "$FAKE_DIR/downloadable"
 }
 
-test_github_action_stale_status_success_filter_uses_newest_successful_run(){
-  setup_stale_status_success_filter
+test_github_action_stale_run_list_uses_newest_recent_successful_run(){
+  setup_stale_run_list
   run_action
 
   assert_exit_code 0
@@ -168,12 +184,12 @@ test_github_action_stale_status_success_filter_uses_newest_successful_run(){
 }
 
 test_github_action_newest_success_artifact_expired_falls_back_to_older_run(){
-  echo '[{"databaseId":100,"status":"completed","conclusion":"success"}]' > "$FAKE_DIR/stale_runs.json"
+  echo '[{"databaseId":100,"status":"completed","conclusion":"success","event":"push","headBranch":"main"}]' > "$FAKE_DIR/stale_runs.json"
   cat > "$FAKE_DIR/runs.json" <<'EOF'
 [
-  {"databaseId":200,"status":"completed","conclusion":"success"},
-  {"databaseId":150,"status":"completed","conclusion":"success"},
-  {"databaseId":100,"status":"completed","conclusion":"success"}
+  {"databaseId":200,"status":"completed","conclusion":"success","event":"push","headBranch":"main"},
+  {"databaseId":150,"status":"completed","conclusion":"success","event":"push","headBranch":"main"},
+  {"databaseId":100,"status":"completed","conclusion":"success","event":"push","headBranch":"main"}
 ]
 EOF
   write_artifacts 200 code-coverage true
@@ -192,9 +208,9 @@ test_github_action_no_baseline_warns_and_exits_zero(){
   echo '[]' > "$FAKE_DIR/stale_runs.json"
   cat > "$FAKE_DIR/runs.json" <<'EOF'
 [
-  {"databaseId":300,"status":"in_progress","conclusion":""},
-  {"databaseId":250,"status":"completed","conclusion":"failure"},
-  {"databaseId":200,"status":"completed","conclusion":"success"}
+  {"databaseId":300,"status":"in_progress","conclusion":"","event":"push","headBranch":"main"},
+  {"databaseId":250,"status":"completed","conclusion":"failure","event":"push","headBranch":"main"},
+  {"databaseId":200,"status":"completed","conclusion":"success","event":"push","headBranch":"main"}
 ]
 EOF
   write_artifacts 200 code-coverage true
@@ -207,8 +223,41 @@ EOF
   assert_not_called "gh pr comment "
 }
 
+test_github_action_base_sha_run_is_preferred_over_newer_runs(){
+  setup_stale_run_list
+  cat > "$FAKE_DIR/commit_runs/abc123.json" <<'EOF'
+[
+  {"databaseId":181,"status":"completed","conclusion":"success","event":"pull_request","headBranch":"feature"},
+  {"databaseId":180,"status":"completed","conclusion":"success","event":"push","headBranch":"main"}
+]
+EOF
+  write_artifacts 181 code-coverage false
+  write_artifacts 180 code-coverage false
+  printf '%s\n' "$CURRENT_RUN_ID" 200 180 181 > "$FAKE_DIR/downloadable"
+  BASELINE_SHA=abc123 run_action
+
+  assert_exit_code 0
+  assert_called "gh run list --workflow=build.yml --commit=abc123 "
+  assert_called "gh run download 180 "
+  assert_not_called "gh run download 181 "
+  assert_not_called "gh run download 200 "
+  assert_called "gh pr comment $PULL_REQUEST_NUMBER "
+}
+
+test_github_action_base_sha_without_successful_run_falls_back_to_recent_runs(){
+  setup_stale_run_list
+  echo '[{"databaseId":190,"status":"in_progress","conclusion":"","event":"push","headBranch":"main"}]' \
+    > "$FAKE_DIR/commit_runs/abc123.json"
+  BASELINE_SHA=abc123 run_action
+
+  assert_exit_code 0
+  assert_called "gh run download 200 "
+  assert_not_called "gh run download 100 "
+  assert_called "gh pr comment $PULL_REQUEST_NUMBER "
+}
+
 test_github_action_skip_comment_still_writes_output(){
-  setup_stale_status_success_filter
+  setup_stale_run_list
   SKIP_COMMENT=true run_action
 
   assert_exit_code 0
@@ -219,9 +268,11 @@ test_github_action_skip_comment_still_writes_output(){
 }
 
 TESTS=(
-  test_github_action_stale_status_success_filter_uses_newest_successful_run
+  test_github_action_stale_run_list_uses_newest_recent_successful_run
   test_github_action_newest_success_artifact_expired_falls_back_to_older_run
   test_github_action_no_baseline_warns_and_exits_zero
+  test_github_action_base_sha_run_is_preferred_over_newer_runs
+  test_github_action_base_sha_without_successful_run_falls_back_to_recent_runs
   test_github_action_skip_comment_still_writes_output
 )
 
@@ -257,7 +308,7 @@ FAILED=0
 for test_name in "${TESTS[@]}"; do
   TEST_DIR=$(mktemp -d)
   FAKE_DIR="$TEST_DIR/fake"
-  mkdir -p "$TEST_DIR/bin" "$FAKE_DIR/artifacts"
+  mkdir -p "$TEST_DIR/bin" "$FAKE_DIR/artifacts" "$FAKE_DIR/commit_runs"
   : > "$FAKE_DIR/calls.log"
   write_stubs "$TEST_DIR/bin"
 
