@@ -29,6 +29,7 @@ You can use the following environment variables to configure the script:
 - TARGET_BRANCH: The base branch to compare the coverage results against (default: main)
 - COVERAGE_ARTIFACT_NAME: The name of the artifact containing the code coverage results (default: code-coverage)
 - COVERAGE_FILE_NAME: The name of the file containing the code coverage results (default: coverage.txt)
+- BASELINE_SEARCH_LIMIT: The number of most recent runs on the target branch to search for a baseline (default: 50)
 - CHANGED_FILES_PATH: The path to the file containing the list of changed files (default: .github/outputs/all_modified_files.json)
 - ROOT_PACKAGE: The import path of the tested repository to add as a prefix to all paths of the changed files (optional)
 - PROJECT_PATH: The path to the root package of the tested repository (optional)
@@ -49,6 +50,7 @@ GITHUB_BASELINE_WORKFLOW=${GITHUB_BASELINE_WORKFLOW:-CI}
 TARGET_BRANCH=${TARGET_BRANCH:-main}
 COVERAGE_ARTIFACT_NAME=${COVERAGE_ARTIFACT_NAME:-code-coverage}
 COVERAGE_FILE_NAME=${COVERAGE_FILE_NAME:-coverage.txt}
+BASELINE_SEARCH_LIMIT=${BASELINE_SEARCH_LIMIT:-50}
 
 OLD_COVERAGE_PATH=.github/outputs/old-coverage.txt
 NEW_COVERAGE_PATH=.github/outputs/new-coverage.txt
@@ -99,16 +101,40 @@ mv "/tmp/gh-run-download-$GITHUB_RUN_ID/$COVERAGE_FILE_NAME" $NEW_COVERAGE_PATH
 rm -r "/tmp/gh-run-download-$GITHUB_RUN_ID"
 end_group
 
+# find_baseline_run_id prints the first of the given run IDs whose run still has an unexpired coverage artifact.
+# Artifacts expire after the repository's retention period, so the newest successful run is not always usable.
+find_baseline_run_id(){
+  local run_id artifact_ids
+  for run_id in "$@"; do
+    if artifact_ids=$(gh api "repos/$GH_REPO/actions/runs/$run_id/artifacts" --paginate \
+        -q ".artifacts[] | select(.name == \"$COVERAGE_ARTIFACT_NAME\" and .expired == false) | .id") \
+      && [ -n "$artifact_ids" ]; then
+      echo "$run_id"
+      return 0
+    fi
+  done
+  return 1
+}
+
 start_group "Download code coverage results from target branch"
-LAST_SUCCESSFUL_RUN_ID=$(gh run list --status=success --branch="$TARGET_BRANCH" --workflow="$GITHUB_BASELINE_WORKFLOW" --event=push --json=databaseId --limit=1 -q '.[] | .databaseId')
-if [ -z "$LAST_SUCCESSFUL_RUN_ID" ]; then
-  echo "::error::No successful run found on the target branch"
-  exit 1
+# The runs are filtered client-side because the server-side --status=success filter of "gh run list" returns stale
+# results, i.e. old runs whose coverage artifact may already have expired.
+SUCCESSFUL_RUN_IDS=$(gh run list --branch="$TARGET_BRANCH" --workflow="$GITHUB_BASELINE_WORKFLOW" --event=push --limit="$BASELINE_SEARCH_LIMIT" --json=databaseId,status,conclusion -q '.[] | select(.status == "completed" and .conclusion == "success") | .databaseId')
+
+# shellcheck disable=SC2086 # Word splitting of the run IDs is intended.
+if ! BASELINE_RUN_ID=$(find_baseline_run_id $SUCCESSFUL_RUN_IDS); then
+  echo "::warning::No successful run of workflow \"$GITHUB_BASELINE_WORKFLOW\" on branch \"$TARGET_BRANCH\" has an unexpired \"$COVERAGE_ARTIFACT_NAME\" artifact. Skipping the coverage report."
+  end_group
+  exit 0
 fi
 
-gh run download "$LAST_SUCCESSFUL_RUN_ID" --name="$COVERAGE_ARTIFACT_NAME" --dir="/tmp/gh-run-download-$LAST_SUCCESSFUL_RUN_ID"
-mv "/tmp/gh-run-download-$LAST_SUCCESSFUL_RUN_ID/$COVERAGE_FILE_NAME" $OLD_COVERAGE_PATH
-rm -r "/tmp/gh-run-download-$LAST_SUCCESSFUL_RUN_ID"
+if ! gh run download "$BASELINE_RUN_ID" --name="$COVERAGE_ARTIFACT_NAME" --dir="/tmp/gh-run-download-$BASELINE_RUN_ID"; then
+  echo "::warning::Could not download artifact \"$COVERAGE_ARTIFACT_NAME\" from baseline run $BASELINE_RUN_ID. Skipping the coverage report."
+  end_group
+  exit 0
+fi
+mv "/tmp/gh-run-download-$BASELINE_RUN_ID/$COVERAGE_FILE_NAME" $OLD_COVERAGE_PATH
+rm -r "/tmp/gh-run-download-$BASELINE_RUN_ID"
 end_group
 
 start_group "Compare code coverage results"
