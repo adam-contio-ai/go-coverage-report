@@ -48,6 +48,7 @@ func main() {
 	flag.String("root", "", "The import path of the tested repository to add as prefix to all paths of the changed files")
 	flag.String("trim", "", "trim a prefix in the \"Impacted Packages\" column of the markdown report")
 	flag.String("format", "markdown", "output format (currently only 'markdown' is supported)")
+	flag.String("projectPath", "", "The path of the Go project within the repository, which is trimmed from the paths of the changed files")
 
 	err := run(programArgs())
 	if err != nil {
